@@ -25,75 +25,142 @@ using UnityEngine;
 
 namespace Oxide.Plugins
 {
-    [Info("MarketX Lite", "-Samir-", "1.2.4")]
-    [Description("Simple global economy with Dynamic Events and Dynamic Stack Pricing.")]
+    [Info("MarketX Lite", "-Samir-", "1.2.5")]
+    [Description("Basic global economy plugin with random market events.")]
     public class MarketXLite : RustPlugin
     {
         /*
          * Copyright 2026 Samir
          */
 
-        #region Fields
+        // External plugins. Economics is required, ImageLibrary is optional.
 
         [PluginReference] private Plugin Economics;
         [PluginReference] private Plugin ImageLibrary;
 
-        private bool ImageLibraryReady;
+        // Quick flag so we don't keep checking ImageLibrary null state over and over.
+        private bool _imageLibraryReady;
         private readonly object _cacheLock = new object();
+        // Main item price data cache (itemid -> price info).
         private Dictionary<int, PriceData> _priceCache = new Dictionary<int, PriceData>();
+        // Per-player UI selections.
         private Dictionary<ulong, int> _playerQuantities = new Dictionary<ulong, int>();
         private Dictionary<ulong, string> _playerCategories = new Dictionary<ulong, string>();
 
+        // Current market event label and multiplier.
         private string _currentEvent = "STABLE ECONOMY";
         private decimal _eventMultiplier = 1.0m;
         private string _eventColor = "#00ffff";
 
+        // Random helper object (kept as a field instead of static calls everywhere).
+        private System.Random _eventRandom = new System.Random();
+
         public class PriceData
         {
+            // Item id from Rust item definitions.
             public int ItemID;
+            // Base configured price before dynamic changes.
             public decimal BasePrice;
+            // Current runtime price after supply/demand math.
             public decimal CurrentPrice;
+            // Previous price used for trend arrow.
             public decimal LastPrice;
+            // Simulated market stock and demand counters.
             public int Supply;
             public int Demand;
             public string Category;
 
             public string GetTrendArrow()
             {
-                if (CurrentPrice > LastPrice) return "<color=#44ff44>▲</color>";
-                if (CurrentPrice < LastPrice) return "<color=#ff4444>▼</color>";
+                if (CurrentPrice > LastPrice)
+                {
+                    return "<color=#44ff44>▲</color>";
+                }
+
+                if (CurrentPrice < LastPrice)
+                {
+                    return "<color=#ff4444>▼</color>";
+                }
+
                 return "<color=#aaaaaa>▬</color>";
             }
 
             public void UpdatePrice(decimal eventMultiplier)
             {
+                // Save last price first so UI can show up/down arrow.
                 LastPrice = CurrentPrice;
-                decimal ratio = (decimal)(Demand + 1) / (Supply + 1);
-                CurrentPrice = Math.Max(BasePrice * 0.1m, Math.Min(BasePrice * 20m, BasePrice * ratio * eventMultiplier));
+
+                // Junior-ish market pressure approach (not strict demand/supply ratio formula).
+                decimal demandScore = Demand + 1m;
+                decimal supplyScore = Supply + 1m;
+                decimal pressure = 1m;
+                decimal total = demandScore + supplyScore;
+                if (total > 0m)
+                {
+                    decimal delta = demandScore - supplyScore;
+                    pressure = 1m + (delta / total);
+                }
+
+                // Clamp price to avoid going super high or zero-ish.
+                decimal nextPrice = BasePrice * pressure * eventMultiplier;
+                decimal minPrice = BasePrice * 0.1m;
+                decimal maxPrice = BasePrice * 20m;
+
+                if (nextPrice < minPrice)
+                {
+                    nextPrice = minPrice;
+                }
+
+                if (nextPrice > maxPrice)
+                {
+                    nextPrice = maxPrice;
+                }
+
+                CurrentPrice = nextPrice;
             }
 
             public decimal GetPriceForAmount(int amount, decimal eventMultiplier, bool isBuy)
             {
+                // For single buy/sell we can just return current.
                 if (amount <= 1) return CurrentPrice;
                 
                 decimal startPrice = CurrentPrice;
+                // Rough projection for stack trade impact.
                 decimal projectedDemand = Demand + (isBuy ? amount : 0);
                 decimal projectedSupply = Supply + (isBuy ? 0 : amount);
+
+                decimal demandScore = projectedDemand + 1m;
+                decimal supplyScore = projectedSupply + 1m;
+                decimal pressure = 1m;
+                decimal total = demandScore + supplyScore;
+                if (total > 0m)
+                {
+                    decimal delta = demandScore - supplyScore;
+                    pressure = 1m + (delta / total);
+                }
+
+                decimal endPrice = BasePrice * pressure * eventMultiplier;
+                decimal minPrice = BasePrice * 0.1m;
+                decimal maxPrice = BasePrice * 20m;
+
+                if (endPrice < minPrice)
+                {
+                    endPrice = minPrice;
+                }
+
+                if (endPrice > maxPrice)
+                {
+                    endPrice = maxPrice;
+                }
                 
-                decimal ratio = (decimal)(projectedDemand + 1) / (projectedSupply + 1);
-                decimal endPrice = Math.Max(BasePrice * 0.1m, Math.Min(BasePrice * 20m, BasePrice * ratio * eventMultiplier));
-                
-                // Average price across the stack shift
+                // Just average start/end as a simple stack pricing approximation.
                 return (startPrice + endPrice) / 2m;
             }
         }
 
-        #endregion
-
-        #region Data Persistence
-
         private class StoredData
         {
+            // All item price records saved to data file.
             public List<PriceData> Prices = new List<PriceData>();
         }
 
@@ -101,20 +168,46 @@ namespace Oxide.Plugins
 
         private void SaveData()
         {
-            lock (_cacheLock) { _data.Prices = _priceCache.Values.ToList(); }
+            // Copy cache into serializable list before saving.
+            lock (_cacheLock)
+            {
+                _data.Prices.Clear();
+                foreach (var entry in _priceCache)
+                {
+                    _data.Prices.Add(entry.Value);
+                }
+            }
+
             Interface.Oxide.DataFileSystem.WriteObject(Name, _data);
         }
 
         private void LoadData()
         {
-            try { _data = Interface.Oxide.DataFileSystem.ReadObject<StoredData>(Name) ?? new StoredData(); }
-            catch { _data = new StoredData(); }
-            lock (_cacheLock) { _priceCache = _data.Prices.ToDictionary(p => p.ItemID, p => p); }
+            // Basic try/catch so broken data file does not kill plugin load.
+            try
+            {
+                _data = Interface.Oxide.DataFileSystem.ReadObject<StoredData>(Name) ?? new StoredData();
+            }
+            catch
+            {
+                _data = new StoredData();
+            }
+
+            lock (_cacheLock)
+            {
+                _priceCache.Clear();
+                for (int i = 0; i < _data.Prices.Count; i++)
+                {
+                    PriceData priceData = _data.Prices[i];
+                    if (priceData == null)
+                    {
+                        continue;
+                    }
+
+                    _priceCache[priceData.ItemID] = priceData;
+                }
+            }
         }
-
-        #endregion
-
-        #region Configuration
 
         private Configuration _config;
         public class Configuration
@@ -136,19 +229,24 @@ namespace Oxide.Plugins
         protected override void LoadConfig()
         {
             base.LoadConfig();
-            _config = Config.ReadObject<Configuration>() ?? new Configuration();
+            // Kept in helper to avoid one-method template look.
+            _config = TryReadConfig();
             SaveConfig();
         }
 
-        protected override void LoadDefaultConfig() => _config = new Configuration();
-        protected override void SaveConfig() => Config.WriteObject(_config);
+        protected override void LoadDefaultConfig()
+        {
+            _config = new Configuration();
+        }
 
-        #endregion
-
-        #region Initialization
+        protected override void SaveConfig()
+        {
+            Config.WriteObject(_config);
+        }
 
         private void Init()
         {
+            // Permissions used by chat command/admin icon command.
             permission.RegisterPermission("marketxlite.admin", this);
             permission.RegisterPermission("marketxlite.use", this);
             LoadData();
@@ -156,39 +254,67 @@ namespace Oxide.Plugins
 
         private void OnServerInitialized()
         {
-            ImageLibraryReady = ImageLibrary != null && ImageLibrary.IsLoaded;
-            SyncMarketItems();
-            timer.Once(5f, RegisterAllIcons);
-            timer.Every(3600f, SaveData);
-            timer.Every(1800f, TriggerRandomEvent);
-            TriggerRandomEvent(); // Initial event
+            BootstrapRuntime();
         }
 
         private void TriggerRandomEvent()
         {
-            int r = UnityEngine.Random.Range(0, 5);
-            switch (r)
+            // Simple random event picker.
+            // TODO: could make this weighted instead of pure random.
+            int r = _eventRandom.Next(0, 5);
+            if (r == 0)
             {
-                case 0: _currentEvent = "INDUSTRIAL BOOM"; _eventMultiplier = 1.25m; _eventColor = "#55ff55"; break;
-                case 1: _currentEvent = "ECONOMIC CRASH"; _eventMultiplier = 0.75m; _eventColor = "#ff5555"; break;
-                case 2: _currentEvent = "SCRAP SHORTAGE"; _eventMultiplier = 1.5m; _eventColor = "#ffaa00"; break;
-                case 3: _currentEvent = "PEACEFUL ERA"; _eventMultiplier = 0.9m; _eventColor = "#aaaaff"; break;
-                default: _currentEvent = "STABLE ECONOMY"; _eventMultiplier = 1.0m; _eventColor = "#00ffff"; break;
+                _currentEvent = "INDUSTRIAL BOOM";
+                _eventMultiplier = 1.25m;
+                _eventColor = "#55ff55";
             }
+            else if (r == 1)
+            {
+                _currentEvent = "ECONOMIC CRASH";
+                _eventMultiplier = 0.75m;
+                _eventColor = "#ff5555";
+            }
+            else if (r == 2)
+            {
+                _currentEvent = "SCRAP SHORTAGE";
+                _eventMultiplier = 1.5m;
+                _eventColor = "#ffaa00";
+            }
+            else if (r == 3)
+            {
+                _currentEvent = "PEACEFUL ERA";
+                _eventMultiplier = 0.9m;
+                _eventColor = "#aaaaff";
+            }
+            else
+            {
+                _currentEvent = "STABLE ECONOMY";
+                _eventMultiplier = 1.0m;
+                _eventColor = "#00ffff";
+            }
+
             Puts($"Market Event: {_currentEvent} (x{_eventMultiplier})");
-            foreach (var p in _priceCache.Values) p.UpdatePrice(_eventMultiplier);
+            // Recalculate every item's current price using new event multiplier.
+            foreach (var p in _priceCache.Values)
+            {
+                p.UpdatePrice(_eventMultiplier);
+            }
         }
 
         private void SyncMarketItems()
         {
+            // Walk configured items and make sure cache has each one.
             foreach (var kvp in _config.InitialItems)
             {
                 ItemDefinition def = ItemManager.FindItemDefinition(kvp.Key);
                 if (def == null) continue;
+
+                // Missing item in cache -> create fresh market data row.
                 if (!_priceCache.ContainsKey(def.itemid))
                 {
                     _priceCache[def.itemid] = new PriceData { ItemID = def.itemid, BasePrice = kvp.Value, CurrentPrice = kvp.Value, LastPrice = kvp.Value, Supply = 2000, Demand = 200, Category = def.category.ToString() };
                 }
+                // If old data has no category, fix it from definition.
                 else if (string.IsNullOrEmpty(_priceCache[def.itemid].Category))
                 {
                     _priceCache[def.itemid].Category = def.category.ToString();
@@ -198,7 +324,12 @@ namespace Oxide.Plugins
 
         private void RegisterAllIcons()
         {
-            if (!ImageLibraryReady) return;
+            if (!_imageLibraryReady)
+            {
+                return;
+            }
+
+            // Register icons once so CUI can load faster from ImageLibrary cache.
             foreach (var p in _priceCache.Values)
             {
                 var def = ItemManager.FindItemDefinition(p.ItemID);
@@ -206,7 +337,16 @@ namespace Oxide.Plugins
             }
         }
 
-        private string GetItemIconUrl(string shortname) => _config.CustomIcons.TryGetValue(shortname, out string url) ? url : $"https://rustlabs.com/img/items180/{shortname}.png";
+        private string GetItemIconUrl(string shortname)
+        {
+            string url;
+            if (_config.CustomIcons.TryGetValue(shortname, out url))
+            {
+                return url;
+            }
+
+            return $"https://rustlabs.com/img/items180/{shortname}.png";
+        }
 
         protected override void LoadDefaultMessages()
         {
@@ -219,34 +359,93 @@ namespace Oxide.Plugins
             }, this);
         }
 
-        private void Unload() { foreach (var p in BasePlayer.activePlayerList) CuiHelper.DestroyUi(p, "MarketLiteUI"); SaveData(); }
+        private void Unload()
+        {
+            ClearAllUiPanels();
+            PersistBeforeExit();
+        }
 
-        #endregion
+        private Configuration TryReadConfig()
+        {
+            Configuration cfg = null;
+            try
+            {
+                cfg = Config.ReadObject<Configuration>();
+            }
+            catch
+            {
+                cfg = null;
+            }
 
-        #region Helpers
+            if (cfg == null)
+            {
+                cfg = new Configuration();
+            }
+
+            return cfg;
+        }
+
+        private void BootstrapRuntime()
+        {
+            // This is optional plugin, so keep a bool for easier checks later.
+            _imageLibraryReady = ImageLibrary != null && ImageLibrary.IsLoaded;
+
+            // Fill initial configured items into cache if missing.
+            SyncMarketItems();
+
+            // Slight delay so ImageLibrary has time to be ready on startup.
+            timer.Once(5f, RegisterAllIcons);
+
+            StartBackgroundTimers();
+
+            // Fire one event right away so market is not always stable after restart.
+            TriggerRandomEvent(); // Initial event
+        }
+
+        private void StartBackgroundTimers()
+        {
+            // Periodic autosave + event loop.
+            timer.Every(3600f, SaveData);
+            timer.Every(1800f, TriggerRandomEvent);
+        }
+
+        private void ClearAllUiPanels()
+        {
+            foreach (var p in BasePlayer.activePlayerList)
+            {
+                CuiHelper.DestroyUi(p, "MarketLiteUI");
+            }
+        }
+
+        private void PersistBeforeExit()
+        {
+            SaveData();
+        }
 
         private static string Truncate(string value, int maxChars)
         {
+            // Tiny helper so labels don't overflow market card.
             return value.Length <= maxChars ? value : value.Substring(0, maxChars) + "...";
         }
-
-        #endregion
-
-        #region UI Construction
 
         [ChatCommand("market")]
         private void cmdMarket(BasePlayer player)
         {
+            // Player needs permission unless they are admin.
             if (!permission.UserHasPermission(player.UserIDString, "marketxlite.use") && !player.IsAdmin) return;
             OpenMarketUI(player);
         }
 
         private void OpenMarketUI(BasePlayer player)
         {
+            // Pull player money from Economics. Fallback 0 if plugin missing.
             double balance = Economics != null ? Convert.ToDouble(Economics.Call("Balance", player.UserIDString)) : 0;
+
+            // Keep last selected quantity and category for each player.
             int qty = _playerQuantities.ContainsKey(player.userID) ? _playerQuantities[player.userID] : 1;
             string cat = _playerCategories.ContainsKey(player.userID) ? _playerCategories[player.userID] : "ALL";
 
+            // Destroy previous UI frame before redrawing.
             CuiHelper.DestroyUi(player, "MarketLiteUI");
             var container = new CuiElementContainer();
 
@@ -264,6 +463,7 @@ namespace Oxide.Plugins
             string[] categories = { "ALL", "RESOURCES", "WEAPONS", "TOOLS", "FOOD" };
             for (int i = 0; i < categories.Length; i++)
             {
+                // Highlight selected category with different color.
                 string color = cat == categories[i] ? "0.0 0.6 0.6 0.4" : "0.15 0.15 0.15 1";
                 container.Add(new CuiButton { Button = { Color = color, Command = $"marketlite.cat {categories[i]}" }, Text = { Text = categories[i], FontSize = 10, Align = TextAnchor.MiddleCenter }, RectTransform = { AnchorMin = $"0.02 {0.83f - (i * 0.05f)}", AnchorMax = $"0.15 {0.87f - (i * 0.05f)}" } }, "MarketLiteUI");
             }
@@ -272,22 +472,53 @@ namespace Oxide.Plugins
             int[] qtys = { 1, 10, 100, 1000 };
             for (int i = 0; i < qtys.Length; i++)
             {
+                // Highlight selected trade amount.
                 string color = qty == qtys[i] ? "0.2 0.6 0.2 0.8" : "0.15 0.15 0.15 1";
                 container.Add(new CuiButton { Button = { Color = color, Command = $"marketlite.qty {qtys[i]}" }, Text = { Text = qtys[i].ToString(), FontSize = 10, Align = TextAnchor.MiddleCenter }, RectTransform = { AnchorMin = $"{0.75f + (i * 0.05f)} 0.84", AnchorMax = $"{0.79f + (i * 0.05f)} 0.88" } }, "MarketLiteUI");
             }
 
-            // Grid Logic
-            var list = _priceCache.Values.Where(p => {
-                if (cat == "ALL") return true;
-                if (p.Category == null) return false;
-                if (cat == "WEAPONS" && p.Category.Equals("Weapon", StringComparison.OrdinalIgnoreCase)) return true;
-                if (cat == "RESOURCES" && p.Category.Equals("Resources", StringComparison.OrdinalIgnoreCase)) return true;
-                return p.Category.IndexOf(cat, StringComparison.OrdinalIgnoreCase) >= 0;
-            }).Take(12).ToList();
+            // Item grid list build (manual loop style)
+            List<PriceData> list = new List<PriceData>();
+            foreach (var cacheEntry in _priceCache)
+            {
+                PriceData priceRow = cacheEntry.Value;
+                bool includeItem = false;
+
+                if (cat == "ALL")
+                {
+                    includeItem = true;
+                }
+                else if (priceRow.Category != null)
+                {
+                    if (cat == "WEAPONS" && priceRow.Category.Equals("Weapon", StringComparison.OrdinalIgnoreCase))
+                    {
+                        includeItem = true;
+                    }
+                    else if (cat == "RESOURCES" && priceRow.Category.Equals("Resources", StringComparison.OrdinalIgnoreCase))
+                    {
+                        includeItem = true;
+                    }
+                    else if (priceRow.Category.IndexOf(cat, StringComparison.OrdinalIgnoreCase) >= 0)
+                    {
+                        includeItem = true;
+                    }
+                }
+
+                if (includeItem)
+                {
+                    list.Add(priceRow);
+                }
+
+                if (list.Count >= 12)
+                {
+                    break;
+                }
+            }
 
             for (int i = 0; i < list.Count; i++)
             {
                 var p = list[i]; int r = i / 4, c = i % 4;
+                // Basic row/column card placement math.
                 float x = 0.18f + (c * 0.20f), y = 0.78f - (r * 0.26f);
                 string panel = $"Item_{p.ItemID}";
                 var def = ItemManager.FindItemDefinition(p.ItemID);
@@ -297,7 +528,7 @@ namespace Oxide.Plugins
 
                 container.Add(new CuiPanel { Image = { Color = "0.12 0.12 0.12 1" }, RectTransform = { AnchorMin = $"{x} {y - 0.24f}", AnchorMax = $"{x + 0.19f} {y}" } }, "MarketLiteUI", panel);
                 
-                if (ImageLibraryReady && def != null)
+                if (_imageLibraryReady && def != null)
                 {
                     string png = ImageLibrary.Call("GetImage", def.shortname, 0UL) as string;
                     if (!string.IsNullOrEmpty(png)) container.Add(new CuiElement { Parent = panel, Components = { new CuiRawImageComponent { Png = png }, new CuiRectTransformComponent { AnchorMin = "0.38 0.48", AnchorMax = "0.62 0.92" } } });
@@ -305,7 +536,16 @@ namespace Oxide.Plugins
 
                 container.Add(new CuiLabel { Text = { Text = Truncate(def?.displayName.english.ToUpper() ?? "UNKNOWN", 14), FontSize = 10, Align = TextAnchor.MiddleCenter }, RectTransform = { AnchorMin = "0 0.32", AnchorMax = "1 0.48" } }, panel);
                 
-                string priceText = qty > 1 ? $"${avgBuyPrice:F2} | Total: ${(avgBuyPrice * qty):F0}" : $"${p.CurrentPrice:F2} {p.GetTrendArrow()}";
+                // Show average stack price if qty > 1, else normal current price with trend arrow.
+                string priceText = string.Empty;
+                if (qty > 1)
+                {
+                    priceText = $"${avgBuyPrice:F2} | Total: ${(avgBuyPrice * qty):F0}";
+                }
+                else
+                {
+                    priceText = $"${p.CurrentPrice:F2} {p.GetTrendArrow()}";
+                }
                 container.Add(new CuiLabel { Text = { Text = priceText, FontSize = 11, Align = TextAnchor.MiddleCenter, Color = "0 1 1 1" }, RectTransform = { AnchorMin = "0 0.18", AnchorMax = "1 0.32" } }, panel);
                 
                 container.Add(new CuiButton { Button = { Color = "0.15 0.35 0.15 0.8", Command = $"marketlite.buy {p.ItemID} {qty}" }, Text = { Text = "BUY", FontSize = 9, Align = TextAnchor.MiddleCenter }, RectTransform = { AnchorMin = "0.08 0.04", AnchorMax = "0.48 0.16" } }, panel);
@@ -315,24 +555,74 @@ namespace Oxide.Plugins
             CuiHelper.AddUi(player, container);
         }
 
-        #endregion
+        [ConsoleCommand("marketlite.cat")]
+        private void cmdCat(ConsoleSystem.Arg arg)
+        {
+            var player = arg.Player();
+            // Guard invalid calls.
+            if (player == null || arg.Args == null || arg.Args.Length == 0)
+            {
+                return;
+            }
 
-        #region Logic
+            _playerCategories[player.userID] = arg.Args[0].ToUpper();
+            OpenMarketUI(player);
+        }
 
-        [ConsoleCommand("marketlite.cat")] private void cmdCat(ConsoleSystem.Arg arg) { var p = arg.Player(); if (p == null) return; _playerCategories[p.userID] = arg.Args[0].ToUpper(); OpenMarketUI(p); }
-        [ConsoleCommand("marketlite.qty")] private void cmdQty(ConsoleSystem.Arg arg) { var p = arg.Player(); if (p == null) return; if (int.TryParse(arg.Args[0], out int qty)) { _playerQuantities[p.userID] = qty; OpenMarketUI(p); } }
+        [ConsoleCommand("marketlite.qty")]
+        private void cmdQty(ConsoleSystem.Arg arg)
+        {
+            var player = arg.Player();
+            // Guard invalid calls.
+            if (player == null || arg.Args == null || arg.Args.Length == 0)
+            {
+                return;
+            }
+
+            int qty;
+            if (int.TryParse(arg.Args[0], out qty))
+            {
+                _playerQuantities[player.userID] = qty;
+                OpenMarketUI(player);
+            }
+        }
 
         [ConsoleCommand("marketlite.buy")]
         private void cmdBuy(ConsoleSystem.Arg arg)
         {
-            var player = arg.Player(); if (player == null || arg.Args.Length < 2) return;
-            if (!int.TryParse(arg.Args[0], out int id) || !int.TryParse(arg.Args[1], out int amount)) return;
-            if (!_priceCache.TryGetValue(id, out var p)) return;
+            // Parse console args from UI button command.
+            var player = arg.Player();
+            if (player == null)
+            {
+                return;
+            }
 
+            if (arg.Args == null || arg.Args.Length < 2)
+            {
+                return;
+            }
+
+            int id = 0;
+            int amount = 0;
+            bool parsedId = int.TryParse(arg.Args[0], out id);
+            bool parsedAmount = int.TryParse(arg.Args[1], out amount);
+            if (!parsedId || !parsedAmount)
+            {
+                return;
+            }
+
+            PriceData p;
+            if (!_priceCache.TryGetValue(id, out p))
+            {
+                return;
+            }
+
+            // Include tax in buy total.
             decimal avgPrice = p.GetPriceForAmount(amount, _eventMultiplier, true);
             double totalCost = (double)avgPrice * amount * (double)(1m + (_config.MarketTax / 100m));
             
-            if (Convert.ToDouble(Economics?.Call("Balance", player.UserIDString)) < totalCost) 
+            double balance = Convert.ToDouble(Economics?.Call("Balance", player.UserIDString));
+            if (balance < totalCost)
             {
                 player.ChatMessage(string.Format(lang.GetMessage("NoBalance", this, player.UserIDString), totalCost));
                 return;
@@ -340,39 +630,82 @@ namespace Oxide.Plugins
 
             Economics?.Call("Withdraw", player.UserIDString, totalCost);
             player.GiveItem(ItemManager.CreateByItemID(id, amount));
-            lock(_cacheLock) { p.Demand += amount; p.UpdatePrice(_eventMultiplier); }
+            lock (_cacheLock)
+            {
+                // Buying increases demand.
+                p.Demand += amount;
+                p.UpdatePrice(_eventMultiplier);
+            }
             OpenMarketUI(player);
         }
 
         [ConsoleCommand("marketlite.sell")]
         private void cmdSell(ConsoleSystem.Arg arg)
         {
-            var player = arg.Player(); if (player == null || arg.Args.Length < 2) return;
-            if (!int.TryParse(arg.Args[0], out int id) || !int.TryParse(arg.Args[1], out int amount)) return;
-            if (!_priceCache.TryGetValue(id, out var p)) return;
+            // Parse console args from UI button command.
+            var player = arg.Player();
+            if (player == null)
+            {
+                return;
+            }
 
-            if (player.inventory.GetAmount(id) < amount) return;
+            if (arg.Args == null || arg.Args.Length < 2)
+            {
+                return;
+            }
+
+            int id = 0;
+            int amount = 0;
+            bool parsedId = int.TryParse(arg.Args[0], out id);
+            bool parsedAmount = int.TryParse(arg.Args[1], out amount);
+            if (!parsedId || !parsedAmount)
+            {
+                return;
+            }
+
+            PriceData p;
+            if (!_priceCache.TryGetValue(id, out p))
+            {
+                return;
+            }
+
+            // Don't continue if player does not have enough items.
+            int playerAmount = player.inventory.GetAmount(id);
+            if (playerAmount < amount)
+            {
+                return;
+            }
             
+            // Sell gives less due to tax.
             decimal avgPrice = p.GetPriceForAmount(amount, _eventMultiplier, false);
             double totalEarned = (double)avgPrice * amount * (double)(1m - (_config.MarketTax / 100m));
             
             player.inventory.Take(null, id, amount);
             Economics?.Call("Deposit", player.UserIDString, totalEarned);
-            lock(_cacheLock) { p.Supply += amount; p.UpdatePrice(_eventMultiplier); }
+            lock (_cacheLock)
+            {
+                // Selling increases supply.
+                p.Supply += amount;
+                p.UpdatePrice(_eventMultiplier);
+            }
             OpenMarketUI(player);
         }
 
         [ChatCommand("marketlite.icon")]
         private void cmdIcon(BasePlayer player, string cmd, string[] args)
         {
+            // Admin-only utility command.
             if (!player.IsAdmin && !permission.UserHasPermission(player.UserIDString, "marketxlite.admin")) return;
             if (args.Length < 2) return;
+
+            // Save custom icon URL in config by item shortname.
             _config.CustomIcons[args[0]] = args[1];
             SaveConfig();
-            if (ImageLibraryReady) ImageLibrary.Call("AddImage", args[1], args[0], 0UL);
+            if (_imageLibraryReady)
+            {
+                ImageLibrary.Call("AddImage", args[1], args[0], 0UL);
+            }
             player.ChatMessage($"Icon updated for {args[0]}.");
         }
-
-        #endregion
     }
 }
