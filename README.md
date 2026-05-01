@@ -1,8 +1,5 @@
 # MarketX Lite
 
-**Version:** 1.2.4  
-**Developer:** Samir
-
 MarketX Lite brings a living, breathing economy to your Rust server prices move with player activity, economic events, and bulk purchases.
 
 ## 🚀 Features
