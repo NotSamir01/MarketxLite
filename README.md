@@ -3,50 +3,45 @@
 **Version:** 1.2.4  
 **Developer:** Samir
 
-MarketX Lite is a lightweight but powerful global economy plugin for Rust. It features a dynamic marketplace where prices fluctuate based on real-time supply and demand, influenced by random economic events and stack-based pricing logic.
+MarketX Lite brings a living, breathing economy to your Rust server — prices move with player activity, economic events, and bulk purchases.
 
 ## 🚀 Features
 
-*   **Dynamic Economy:** Prices aren't static. They shift based on player activity (buying increases demand/price, selling increases supply/price).
-*   **Economic Events:** Random events trigger every 30 minutes, impacting the entire market:
-    *   **Industrial Boom:** Prices increase (1.25x).
-    *   **Economic Crash:** Prices drop (0.75x).
-    *   **Scrap Shortage:** Dramatic price hikes (1.5x).
-    *   **Peaceful Era:** Slight discounts (0.9x).
-    *   **Stable Economy:** Standard pricing.
-*   **Stack Pricing:** Unlike basic shops, MarketX Lite calculates the "average" price for a stack. Buying 1000 wood will cost slightly more per unit than buying 1, simulating market slippage.
-*   **Modern CUI:** A clean, dark-themed user interface with:
-    *   **Category Sidebar:** Filter by Resources, Weapons, Tools, and Food.
-    *   **Quick Quantity Selector:** Switch between 1, 10, 100, and 1000 unit views.
-    *   **Trend Indicators:** Visual arrows (▲/▼) showing if a price has risen or fallen since the last update.
-*   **Icon Support:** Automatically pulls item icons from RustLabs, with support for `ImageLibrary` and custom URL overrides.
+*   **Dynamic Economy:** Prices shift based on real player behavior. Buying increases demand and price. Selling increases supply and lowers price.
+*   **Economic Events:** Every 30 minutes, a random event impacts the entire market:
+    *   **Industrial Boom:** +25% prices
+    *   **Economic Crash:** -25% prices
+    *   **Scrap Shortage:** +50% prices
+    *   **Peaceful Era:** -10% prices
+    *   **Stable Economy:** Standard pricing
+*   **Stack Pricing (Slippage):** Bulk purchases cost more per unit. Buying 1000 wood costs slightly more than buying 1 — prevents market exploits naturally.
+*   **Modern UI:** Dark-themed interface with category filters (Resources, Weapons, Tools, Food), quantity selector (1, 10, 100, 1000), and price trend arrows (▲/▼).
+*   **Icon Support:** Auto-pulls images from RustLabs. Optional ImageLibrary integration for better performance. Custom URL overrides supported.
 
 ## 📦 Dependencies
 
 *   [Economics](https://umod.org/plugins/economics) (Required)
-*   [ImageLibrary](https://umod.org/plugins/image-library) (Optional, for improved icon performance)
+*   [ImageLibrary](https://umod.org/plugins/image-library) (Optional, for faster icons)
 
 ## 🛠️ Installation
 
 1.  Download `MarketXLite.cs`.
-2.  Place it in your server's `oxide/plugins` folder.
-3.  Ensure `Economics` is also installed.
-4.  Configure your starting items and base prices in `oxide/config/MarketXLite.json`.
+2.  Place it in `oxide/plugins`.
+3.  Install Economics if not already present.
+4.  Configure starting items and prices in `oxide/config/MarketXLite.json`.
 
 ## ⌨️ Commands
 
-### Chat Commands
-*   `/market` - Opens the main Market UI.
-*   `/marketlite.icon <shortname> <url>` - (Admin) Set a custom icon for a specific item.
+**Players:**
+*   `/market` — Opens the market UI.
 
-### Console Commands
-*   `marketlite.buy <itemid> <amount>` - Internal UI command for purchasing.
-*   `marketlite.sell <itemid> <amount>` - Internal UI command for selling.
+**Admins:**
+*   `/marketlite.icon <shortname> <url>` — Set custom icon for any item.
 
 ## 🔐 Permissions
 
-*   `marketxlite.use` - Allows players to open the market and trade.
-*   `marketxlite.admin` - Allows usage of admin configuration commands.
+*   `marketxlite.use` — Can open market and trade.
+*   `marketxlite.admin` — Can use admin commands.
 
 ## ⚙️ Configuration
 
@@ -64,8 +59,3 @@ MarketX Lite is a lightweight but powerful global economy plugin for Rust. It fe
   },
   "Custom Icon Overrides (Shortname:URL)": {}
 }
-```
-
-## 📄 License
-
-This project is licensed under the Apache License 2.0 - see the file for details.
